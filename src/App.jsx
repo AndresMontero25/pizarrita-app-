@@ -8,7 +8,7 @@ if (typeof window !== 'undefined') {
   if (!window.process) window.process = { env: { NODE_ENV: 'development' } };
 }
 
-import { db, getAllProjects, createProject, deleteProject, saveScene, getScene } from './db';
+import { getAllProjects, createProject, deleteProject, renameProject, saveScene, getScene } from './db';
 import { Plus, Trash2, Folder, Sun, Moon, Layout, Settings } from 'lucide-react';
 import './index.css';
 
@@ -91,8 +91,8 @@ function App() {
       setProjects(allProjects);
 
       const lastId = localStorage.getItem('lastProjectId');
-      if (lastId && allProjects.find(p => p.id === parseInt(lastId))) {
-        handleProjectSelect(parseInt(lastId));
+      if (lastId && allProjects.find(p => p.id === lastId)) {
+        handleProjectSelect(lastId);
       } else if (allProjects.length > 0) {
         handleProjectSelect(allProjects[0].id);
       } else {
@@ -145,7 +145,7 @@ function App() {
   const handleConfirmRename = async (id) => {
     const name = renamingName.trim();
     if (name) {
-      await db.projects.update(id, { name });
+      await renameProject(id, name);
       const updated = await getAllProjects();
       setProjects(updated);
     }

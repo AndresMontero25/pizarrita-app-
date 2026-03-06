@@ -1,38 +1,48 @@
-import Dexie from 'dexie';
+import { db } from './firebase';
+import {
+  collection, doc, addDoc, getDoc, getDocs,
+  updateDoc, deleteDoc, setDoc, query, orderBy
+} from 'firebase/firestore';
 
-export const db = new Dexie('ExcalidrawDB');
+const projectsCol = collection(db, 'projects');
 
-db.version(1).stores({
-  projects: '++id, name, createdAt, updatedAt',
-  scenes: 'projectId, elements, appState, files' // projectId is the primary key for scenes
-});
-
-// Helper functions for project management
-export const getAllProjects = () => db.projects.toArray();
-export const getProjectById = (id) => db.projects.get(id);
-export const createProject = (name) => {
-  const now = Date.now();
-  return db.projects.add({
-    name,
-    createdAt: now,
-    updatedAt: now
-  });
+export const getAllProjects = async () => {
+  const q = query(projectsCol, orderBy('createdAt', 'asc'));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
 };
+
+export const createProject = async (name) => {
+  const now = Date.now();
+  const docRef = await addDoc(projectsCol, { name, createdAt: now, updatedAt: now });
+  return docRef.id;
+};
+
 export const deleteProject = async (id) => {
-  await db.transaction('rw', db.projects, db.scenes, async () => {
-    await db.projects.delete(id);
-    await db.scenes.delete(id);
-  });
+  await deleteDoc(doc(db, 'projects', id));
+  await deleteDoc(doc(db, 'scenes', id));
+};
+
+export const renameProject = async (id, name) => {
+  await updateDoc(doc(db, 'projects', id), { name, updatedAt: Date.now() });
 };
 
 export const saveScene = async (projectId, elements, appState, files) => {
-  await db.scenes.put({
-    projectId,
-    elements: JSON.parse(JSON.stringify(elements)), // Ensure clone
-    appState: JSON.parse(JSON.stringify(appState)),
-    files: JSON.parse(JSON.stringify(files || {}))
+  await setDoc(doc(db, 'scenes', projectId), {
+    elements: JSON.stringify(elements),
+    appState: JSON.stringify(appState),
+    files: JSON.stringify(files || {}),
   });
-  await db.projects.update(projectId, { updatedAt: Date.now() });
+  await updateDoc(doc(db, 'projects', projectId), { updatedAt: Date.now() });
 };
 
-export const getScene = (projectId) => db.scenes.get(projectId);
+export const getScene = async (projectId) => {
+  const snap = await getDoc(doc(db, 'scenes', projectId));
+  if (!snap.exists()) return null;
+  const data = snap.data();
+  return {
+    elements: JSON.parse(data.elements || '[]'),
+    appState: JSON.parse(data.appState || '{}'),
+    files: JSON.parse(data.files || '{}'),
+  };
+};
