@@ -207,6 +207,92 @@ body, html, #root {
   color: var(--text-color);
 }
 
+/* Save button states */
+.project-item.active .project-actions {
+  opacity: 1;
+}
+
+.save-btn--unsaved {
+  color: #fbbf24 !important;
+}
+
+.save-btn--saving {
+  opacity: 0.6 !important;
+  cursor: default !important;
+}
+
+.save-btn--saved {
+  color: rgba(255, 255, 255, 0.6) !important;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Delete modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 24px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.modal h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text-color);
+}
+
+.modal p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-color);
+  opacity: 0.75;
+}
+
+.modal-error {
+  color: #ef4444 !important;
+  opacity: 1 !important;
+  font-size: 0.85rem !important;
+  margin: 0 !important;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.btn-danger {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-danger:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
 /* Glassmorphism for Excalidraw UI integration */
 .excalidraw .layer-ui__wrapper {
   padding: 10px;

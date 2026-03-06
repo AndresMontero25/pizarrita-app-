@@ -1,15 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, Component } from 'react';
 import { Excalidraw } from '@excalidraw/excalidraw';
 
-
 // Polyfills for Excalidraw/Vite
 if (typeof window !== 'undefined') {
   window.EXCALIDRAW_ASSET_PATH = "/";
   if (!window.process) window.process = { env: { NODE_ENV: 'development' } };
 }
 
-import { getAllProjects, createProject, deleteProject, renameProject, saveScene, getScene } from './db';
-import { Plus, Trash2, Folder, Sun, Moon, Layout, Settings } from 'lucide-react';
+import { getAllProjects, createProject, deleteProject, renameProject, saveScene, getScene, getDeletePassword } from './db';
+import { Plus, Trash2, Folder, Sun, Moon, Layout, Settings, Save, Check, Loader } from 'lucide-react';
 import './index.css';
 
 class ErrorBoundary extends Component {
@@ -21,22 +20,55 @@ class ErrorBoundary extends Component {
   }
 }
 
+function DeleteModal({ projectName, onConfirm, onCancel, error }) {
+  const [input, setInput] = useState('');
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <h3>Eliminar pizarra</h3>
+        <p>Ingresa la clave para eliminar <strong>{projectName}</strong>:</p>
+        <input
+          className="rename-input"
+          type="password"
+          autoFocus
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') onConfirm(input);
+            if (e.key === 'Escape') onCancel();
+          }}
+          placeholder="Clave de borrado"
+        />
+        {error && <p className="modal-error">{error}</p>}
+        <div className="modal-actions">
+          <button className="btn btn-danger" onClick={() => onConfirm(input)}>Eliminar</button>
+          <button className="btn" onClick={onCancel}>Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [initialData, setInitialData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
-  const [newProjectName, setNewProjectName] = useState(null); // null = oculto, string = mostrando input
+  const [newProjectName, setNewProjectName] = useState(null);
   const [renamingId, setRenamingId] = useState(null);
   const [renamingName, setRenamingName] = useState('');
+  const [saveStatus, setSaveStatus] = useState('saved'); // 'saved' | 'unsaved' | 'saving'
+  const [deleteModal, setDeleteModal] = useState({ open: false, projectId: null, projectName: '' });
+  const [deleteError, setDeleteError] = useState('');
+  const [deletePassword, setDeletePassword] = useState('borrado123');
+
   const saveTimeoutRef = useRef(null);
   const pendingSceneRef = useRef(null);
   const themeRef = useRef(theme);
 
   useEffect(() => { themeRef.current = theme; }, [theme]);
 
-  // Flush pending save immediately — stable, safe to call before project switch
   const flushPendingSave = useCallback(async () => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -49,12 +81,32 @@ function App() {
     }
   }, []);
 
-  const handleProjectSelect = useCallback(async (id) => {
+  const handleManualSave = useCallback(async () => {
+    setSaveStatus('saving');
     await flushPendingSave();
+    setSaveStatus('saved');
+  }, [flushPendingSave]);
+
+  const handleProjectSelect = useCallback(async (id) => {
+    if (pendingSceneRef.current || saveTimeoutRef.current) {
+      const ok = window.confirm('Tienes cambios sin guardar. ¿Guardar antes de cambiar de pizarra?');
+      if (ok) {
+        setSaveStatus('saving');
+        await flushPendingSave();
+        setSaveStatus('saved');
+      } else {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
+        }
+        pendingSceneRef.current = null;
+      }
+    }
 
     setLoading(true);
     setActiveProjectId(id);
-    setInitialData(null); // Prevent stale scene from mounting in new Excalidraw instance
+    setInitialData(null);
+    setSaveStatus('saved');
     localStorage.setItem('lastProjectId', id.toString());
 
     const scene = await getScene(id);
@@ -82,13 +134,13 @@ function App() {
 
     setInitialData(cleanSceneData(scene || {}));
     setLoading(false);
-  }, [flushPendingSave]); // stable — reads theme via ref
+  }, [flushPendingSave]);
 
-  // Initialize projects and load last active project
   useEffect(() => {
     const init = async () => {
-      const allProjects = await getAllProjects();
+      const [allProjects, pwd] = await Promise.all([getAllProjects(), getDeletePassword()]);
       setProjects(allProjects);
+      setDeletePassword(pwd);
 
       const lastId = localStorage.getItem('lastProjectId');
       if (lastId && allProjects.find(p => p.id === lastId)) {
@@ -105,7 +157,6 @@ function App() {
     init();
   }, [handleProjectSelect]);
 
-  // Update theme on document
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
@@ -121,12 +172,23 @@ function App() {
     handleProjectSelect(id);
   };
 
-  const handleDeleteProject = async (e, id) => {
+  const handleDeleteClick = (e, id, name) => {
     e.stopPropagation();
-    await deleteProject(id);
+    setDeleteError('');
+    setDeleteModal({ open: true, projectId: id, projectName: name });
+  };
+
+  const handleDeleteConfirm = async (inputPassword) => {
+    if (inputPassword !== deletePassword) {
+      setDeleteError('Clave incorrecta. Inténtalo de nuevo.');
+      return;
+    }
+    const { projectId } = deleteModal;
+    setDeleteModal({ open: false, projectId: null, projectName: '' });
+    await deleteProject(projectId);
     const updated = await getAllProjects();
     setProjects(updated);
-    if (activeProjectId === id) {
+    if (activeProjectId === projectId) {
       if (updated.length > 0) {
         handleProjectSelect(updated[0].id);
       } else {
@@ -155,24 +217,28 @@ function App() {
   const onExcalidrawChange = (elements, appState, files) => {
     if (!activeProjectId) return;
 
-    // Capture latest scene with its project ID at this moment
     const snapshot = { projectId: activeProjectId, elements, appState, files };
     pendingSceneRef.current = snapshot;
+    setSaveStatus('unsaved');
 
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
     saveTimeoutRef.current = setTimeout(async () => {
       saveTimeoutRef.current = null;
-      // Use the captured snapshot — not closure vars — to avoid stale project ID
       const pending = pendingSceneRef.current;
       if (!pending) return;
+      setSaveStatus('saving');
       try {
         await saveScene(pending.projectId, pending.elements, pending.appState, pending.files);
-        if (pendingSceneRef.current === pending) pendingSceneRef.current = null;
+        if (pendingSceneRef.current === pending) {
+          pendingSceneRef.current = null;
+          setSaveStatus('saved');
+        }
       } catch (err) {
         console.error('[AutoSave] Error saving scene:', err);
+        setSaveStatus('unsaved');
       }
-    }, 1000);
+    }, 1500);
   };
 
   const toggleTheme = () => {
@@ -185,6 +251,15 @@ function App() {
 
   return (
     <div className="app-container">
+      {deleteModal.open && (
+        <DeleteModal
+          projectName={deleteModal.projectName}
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteModal({ open: false, projectId: null, projectName: '' })}
+          error={deleteError}
+        />
+      )}
+
       <div className="sidebar">
         <div className="sidebar-header">
           <div className="logo">
@@ -226,6 +301,18 @@ function App() {
               </div>
               {renamingId !== project.id && (
                 <div className="project-actions">
+                  {activeProjectId === project.id && (
+                    <button
+                      className={`icon-btn save-btn save-btn--${saveStatus}`}
+                      onClick={(e) => { e.stopPropagation(); handleManualSave(); }}
+                      title={saveStatus === 'saved' ? 'Guardado' : saveStatus === 'saving' ? 'Guardando...' : 'Guardar cambios'}
+                      disabled={saveStatus === 'saving'}
+                    >
+                      {saveStatus === 'saved' && <Check size={14} />}
+                      {saveStatus === 'unsaved' && <Save size={14} />}
+                      {saveStatus === 'saving' && <Loader size={14} className="spin" />}
+                    </button>
+                  )}
                   <button
                     className="icon-btn"
                     onClick={(e) => handleStartRename(e, project.id, project.name)}
@@ -235,7 +322,7 @@ function App() {
                   </button>
                   <button
                     className="icon-btn"
-                    onClick={(e) => handleDeleteProject(e, project.id)}
+                    onClick={(e) => handleDeleteClick(e, project.id, project.name)}
                     title="Eliminar"
                   >
                     <Trash2 size={16} />
