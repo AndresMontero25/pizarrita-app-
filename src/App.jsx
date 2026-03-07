@@ -66,6 +66,8 @@ function App() {
   const saveTimeoutRef = useRef(null);
   const pendingSceneRef = useRef(null);
   const themeRef = useRef(theme);
+  const lastElementsRef = useRef(null);
+  const lastFilesRef = useRef(null);
 
   useEffect(() => { themeRef.current = theme; }, [theme]);
 
@@ -132,7 +134,10 @@ function App() {
       };
     };
 
-    setInitialData(cleanSceneData(scene || {}));
+    const cleaned = cleanSceneData(scene || {});
+    lastElementsRef.current = cleaned.elements;
+    lastFilesRef.current = cleaned.files;
+    setInitialData(cleaned);
     setLoading(false);
   }, [flushPendingSave]);
 
@@ -216,6 +221,11 @@ function App() {
 
   const onExcalidrawChange = (elements, appState, files) => {
     if (!activeProjectId) return;
+
+    // Only react to actual drawing changes, not viewport/selection changes
+    if (elements === lastElementsRef.current && files === lastFilesRef.current) return;
+    lastElementsRef.current = elements;
+    lastFilesRef.current = files;
 
     const snapshot = { projectId: activeProjectId, elements, appState, files };
     pendingSceneRef.current = snapshot;
