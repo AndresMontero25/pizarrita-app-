@@ -7,8 +7,14 @@ if (typeof window !== 'undefined') {
   if (!window.process) window.process = { env: { NODE_ENV: 'development' } };
 }
 
-import { getAllProjects, createProject, deleteProject, renameProject, saveScene, getScene, getDeletePassword } from './db';
-import { Plus, Trash2, Folder, Sun, Moon, Layout, Settings, Save, Check, Loader } from 'lucide-react';
+import {
+  getAllProjects, createProject, deleteProject, renameProject,
+  saveScene, getScene, getAllUsers, shareProject, unshareProject
+} from './db';
+import { auth } from './firebase';
+import { onAuthStateChanged, signOut, reauthenticateWithCredential, EmailAuthProvider } from 'firebase/auth';
+import AuthPage from './AuthPage';
+import { Plus, Trash2, Folder, Sun, Moon, Layout, Settings, Save, Check, Loader, LogOut, Share2, Eye } from 'lucide-react';
 import './index.css';
 
 class ErrorBoundary extends Component {
@@ -20,28 +26,29 @@ class ErrorBoundary extends Component {
   }
 }
 
+// Delete modal — uses the user's own login password via Firebase re-auth
 function DeleteModal({ projectName, onConfirm, onCancel, error }) {
-  const [input, setInput] = useState('');
+  const [password, setPassword] = useState('');
   return (
     <div className="modal-overlay">
       <div className="modal">
         <h3>Eliminar pizarra</h3>
-        <p>Ingresa la clave para eliminar <strong>{projectName}</strong>:</p>
+        <p>Ingresa tu contraseña para eliminar <strong>{projectName}</strong>:</p>
         <input
           className="rename-input"
           type="password"
           autoFocus
-          value={input}
-          onChange={e => setInput(e.target.value)}
+          value={password}
+          onChange={e => setPassword(e.target.value)}
           onKeyDown={e => {
-            if (e.key === 'Enter') onConfirm(input);
+            if (e.key === 'Enter') onConfirm(password);
             if (e.key === 'Escape') onCancel();
           }}
-          placeholder="Clave de borrado"
+          placeholder="Tu contraseña de acceso"
         />
         {error && <p className="modal-error">{error}</p>}
         <div className="modal-actions">
-          <button className="btn btn-danger" onClick={() => onConfirm(input)}>Eliminar</button>
+          <button className="btn btn-danger" onClick={() => onConfirm(password)}>Eliminar</button>
           <button className="btn" onClick={onCancel}>Cancelar</button>
         </div>
       </div>
@@ -49,7 +56,75 @@ function DeleteModal({ projectName, onConfirm, onCancel, error }) {
   );
 }
 
+// Share modal — shows all registered users and lets owner toggle access
+function ShareModal({ project, currentUser, onClose, onUpdate }) {
+  const [allUsers, setAllUsers] = useState([]);
+  const [sharedWith, setSharedWith] = useState(project.sharedWith || []);
+  const [busy, setBusy] = useState(false);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+
+  useEffect(() => {
+    getAllUsers().then(users => {
+      setAllUsers(users.filter(u => u.uid !== currentUser.uid));
+      setLoadingUsers(false);
+    });
+  }, [currentUser.uid]);
+
+  const handleToggle = async (targetUid) => {
+    setBusy(true);
+    if (sharedWith.includes(targetUid)) {
+      await unshareProject(project.id, targetUid);
+      setSharedWith(prev => prev.filter(uid => uid !== targetUid));
+    } else {
+      await shareProject(project.id, targetUid);
+      setSharedWith(prev => [...prev, targetUid]);
+    }
+    setBusy(false);
+    onUpdate(project.id, sharedWith.includes(targetUid)
+      ? sharedWith.filter(uid => uid !== targetUid)
+      : [...sharedWith, targetUid]);
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal modal--share">
+        <h3>Compartir "{project.name}"</h3>
+        <p>Los usuarios con acceso pueden ver la pizarra, pero no editarla ni eliminarla.</p>
+
+        {loadingUsers ? (
+          <p className="share-loading">Cargando usuarios...</p>
+        ) : allUsers.length === 0 ? (
+          <p className="share-empty">No hay otros usuarios registrados aún.</p>
+        ) : (
+          <div className="share-user-list">
+            {allUsers.map(u => {
+              const hasAccess = sharedWith.includes(u.uid);
+              return (
+                <div key={u.uid} className="share-user-item">
+                  <span className="share-user-email">{u.email}</span>
+                  <button
+                    className={`btn ${hasAccess ? 'btn-danger' : 'btn-primary'} share-toggle-btn`}
+                    onClick={() => handleToggle(u.uid)}
+                    disabled={busy}
+                  >
+                    {hasAccess ? 'Quitar acceso' : 'Dar acceso'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={onClose}>Cerrar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
+  const [user, setUser] = useState(undefined); // undefined = checking, null = not logged in
   const [projects, setProjects] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [initialData, setInitialData] = useState(null);
@@ -61,7 +136,7 @@ function App() {
   const [saveStatus, setSaveStatus] = useState('saved'); // 'saved' | 'unsaved' | 'saving'
   const [deleteModal, setDeleteModal] = useState({ open: false, projectId: null, projectName: '' });
   const [deleteError, setDeleteError] = useState('');
-  const [deletePassword, setDeletePassword] = useState('borrado123');
+  const [shareModal, setShareModal] = useState({ open: false, project: null });
 
   const saveTimeoutRef = useRef(null);
   const pendingSceneRef = useRef(null);
@@ -69,7 +144,25 @@ function App() {
   const lastElementsRef = useRef(null);
   const lastFilesRef = useRef(null);
 
+  // Track auth state
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u ?? null);
+      if (!u) {
+        // Reset all state on logout
+        setProjects([]);
+        setActiveProjectId(null);
+        setInitialData(null);
+        setLoading(true);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   useEffect(() => { themeRef.current = theme; }, [theme]);
+
+  const activeProject = projects.find(p => p.id === activeProjectId) ?? null;
+  const isActiveProjectOwned = activeProject?.isOwned ?? true;
 
   const flushPendingSave = useCallback(async () => {
     if (saveTimeoutRef.current) {
@@ -141,11 +234,12 @@ function App() {
     setLoading(false);
   }, [flushPendingSave]);
 
+  // Load projects once user is authenticated
   useEffect(() => {
+    if (!user) return;
     const init = async () => {
-      const [allProjects, pwd] = await Promise.all([getAllProjects(), getDeletePassword()]);
+      const allProjects = await getAllProjects(user.uid);
       setProjects(allProjects);
-      setDeletePassword(pwd);
 
       const lastId = localStorage.getItem('lastProjectId');
       if (lastId && allProjects.find(p => p.id === lastId)) {
@@ -153,14 +247,14 @@ function App() {
       } else if (allProjects.length > 0) {
         handleProjectSelect(allProjects[0].id);
       } else {
-        const newId = await createProject('Pizarra Inicial');
-        const updated = await getAllProjects();
+        const newId = await createProject('Pizarra Inicial', user.uid);
+        const updated = await getAllProjects(user.uid);
         setProjects(updated);
         handleProjectSelect(newId);
       }
     };
     init();
-  }, [handleProjectSelect]);
+  }, [user, handleProjectSelect]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -171,8 +265,8 @@ function App() {
     const name = newProjectName.trim();
     if (!name) return;
     setNewProjectName(null);
-    const id = await createProject(name);
-    const updated = await getAllProjects();
+    const id = await createProject(name, user.uid);
+    const updated = await getAllProjects(user.uid);
     setProjects(updated);
     handleProjectSelect(id);
   };
@@ -183,15 +277,20 @@ function App() {
     setDeleteModal({ open: true, projectId: id, projectName: name });
   };
 
-  const handleDeleteConfirm = async (inputPassword) => {
-    if (inputPassword !== deletePassword) {
-      setDeleteError('Clave incorrecta. Inténtalo de nuevo.');
+  const handleDeleteConfirm = async (password) => {
+    // Re-authenticate with Firebase using the user's own password
+    try {
+      const credential = EmailAuthProvider.credential(user.email, password);
+      await reauthenticateWithCredential(user, credential);
+    } catch {
+      setDeleteError('Contraseña incorrecta. Inténtalo de nuevo.');
       return;
     }
+
     const { projectId } = deleteModal;
     setDeleteModal({ open: false, projectId: null, projectName: '' });
     await deleteProject(projectId);
-    const updated = await getAllProjects();
+    const updated = await getAllProjects(user.uid);
     setProjects(updated);
     if (activeProjectId === projectId) {
       if (updated.length > 0) {
@@ -213,16 +312,21 @@ function App() {
     const name = renamingName.trim();
     if (name) {
       await renameProject(id, name);
-      const updated = await getAllProjects();
+      const updated = await getAllProjects(user.uid);
       setProjects(updated);
     }
     setRenamingId(null);
   };
 
-  const onExcalidrawChange = (elements, appState, files) => {
-    if (!activeProjectId) return;
+  const handleShareUpdate = (projectId, newSharedWith) => {
+    setProjects(prev => prev.map(p =>
+      p.id === projectId ? { ...p, sharedWith: newSharedWith } : p
+    ));
+  };
 
-    // Only react to actual drawing changes, not viewport/selection changes
+  const onExcalidrawChange = (elements, appState, files) => {
+    if (!activeProjectId || !isActiveProjectOwned) return;
+
     if (elements === lastElementsRef.current && files === lastFilesRef.current) return;
     lastElementsRef.current = elements;
     lastFilesRef.current = files;
@@ -255,6 +359,13 @@ function App() {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
+  // Auth states
+  if (user === undefined) {
+    return <div className="loading-overlay">Cargando...</div>;
+  }
+  if (user === null) {
+    return <AuthPage />;
+  }
   if (loading && !initialData) {
     return <div className="loading-overlay">Cargando pizarra...</div>;
   }
@@ -270,15 +381,29 @@ function App() {
         />
       )}
 
+      {shareModal.open && shareModal.project && (
+        <ShareModal
+          project={shareModal.project}
+          currentUser={user}
+          onClose={() => setShareModal({ open: false, project: null })}
+          onUpdate={handleShareUpdate}
+        />
+      )}
+
       <div className="sidebar">
         <div className="sidebar-header">
           <div className="logo">
             <Layout size={24} />
             <span>Pizarrita App</span>
           </div>
-          <button className="icon-btn" onClick={toggleTheme}>
-            {theme === 'light' ? <Moon size={20} /> : <Sun size={20} />}
-          </button>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <button className="icon-btn" onClick={toggleTheme} title="Cambiar tema">
+              {theme === 'light' ? <Moon size={20} /> : <Sun size={20} />}
+            </button>
+            <button className="icon-btn" onClick={() => signOut(auth)} title="Cerrar sesión">
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
 
         <div className="project-list">
@@ -289,32 +414,37 @@ function App() {
               onClick={() => renamingId !== project.id && handleProjectSelect(project.id)}
             >
               <div className="project-info">
-                <Folder size={18} />
+                {project.isOwned ? <Folder size={18} /> : <Eye size={18} />}
                 {renamingId === project.id ? (
                   <input
                     className="rename-input"
                     value={renamingName}
                     autoFocus
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setRenamingName(e.target.value)}
-                    onKeyDown={(e) => {
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => setRenamingName(e.target.value)}
+                    onKeyDown={e => {
                       if (e.key === 'Enter') handleConfirmRename(project.id);
                       if (e.key === 'Escape') setRenamingId(null);
                     }}
                     onBlur={() => handleConfirmRename(project.id)}
                   />
                 ) : (
-                  <span onDoubleClick={(e) => handleStartRename(e, project.id, project.name)}>
+                  <span
+                    onDoubleClick={e => project.isOwned && handleStartRename(e, project.id, project.name)}
+                    title={project.isOwned ? 'Doble clic para renombrar' : 'Pizarra compartida contigo'}
+                  >
                     {project.name}
                   </span>
                 )}
               </div>
+
               {renamingId !== project.id && (
                 <div className="project-actions">
-                  {activeProjectId === project.id && (
+                  {/* Save button — only for owned projects */}
+                  {project.isOwned && activeProjectId === project.id && (
                     <button
                       className={`icon-btn save-btn save-btn--${saveStatus}`}
-                      onClick={(e) => { e.stopPropagation(); handleManualSave(); }}
+                      onClick={e => { e.stopPropagation(); handleManualSave(); }}
                       title={saveStatus === 'saved' ? 'Guardado' : saveStatus === 'saving' ? 'Guardando...' : 'Guardar cambios'}
                       disabled={saveStatus === 'saving'}
                     >
@@ -323,20 +453,33 @@ function App() {
                       {saveStatus === 'saving' && <Loader size={14} className="spin" />}
                     </button>
                   )}
-                  <button
-                    className="icon-btn"
-                    onClick={(e) => handleStartRename(e, project.id, project.name)}
-                    title="Renombrar"
-                  >
-                    <Settings size={14} />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    onClick={(e) => handleDeleteClick(e, project.id, project.name)}
-                    title="Eliminar"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+
+                  {/* Actions only for owned projects */}
+                  {project.isOwned && (
+                    <>
+                      <button
+                        className="icon-btn"
+                        onClick={e => { e.stopPropagation(); setShareModal({ open: true, project }); }}
+                        title="Compartir"
+                      >
+                        <Share2 size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        onClick={e => handleStartRename(e, project.id, project.name)}
+                        title="Renombrar"
+                      >
+                        <Settings size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        onClick={e => handleDeleteClick(e, project.id, project.name)}
+                        title="Eliminar"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -351,8 +494,8 @@ function App() {
                 autoFocus
                 placeholder="Nombre de la pizarra"
                 value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                onKeyDown={(e) => {
+                onChange={e => setNewProjectName(e.target.value)}
+                onKeyDown={e => {
                   if (e.key === 'Enter') handleConfirmCreate();
                   if (e.key === 'Escape') setNewProjectName(null);
                 }}
@@ -384,6 +527,7 @@ function App() {
                 initialData={initialData}
                 onChange={onExcalidrawChange}
                 theme={theme}
+                viewModeEnabled={!isActiveProjectOwned}
               />
             </ErrorBoundary>
           </div>
